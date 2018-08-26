@@ -1,0 +1,2 @@
+#!/bin/sh
+exec curl -LO https://tools.ietf.org/rfc/rfc${1}.txt

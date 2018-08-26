@@ -1,0 +1,79 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+#
+# gen/tables - Generate Tables for the HTTP Messge Parser
+#
+# These table definitions were taken directly from
+# RFC 5234 (Augmented BNF for Syntax Specifications: ABNF) and
+# RFC 7230 (Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing)
+#
+# This script aims to emit high quality snippets of C code that can
+# be #include'd into the final msg.c source file to make life easier
+# on the implementor.
+#
+
+my @flags = ();
+my @chars = ();
+for (my $i = 0; $i < 256; $i++) { $chars[$i] = 0; }
+
+my $value = 1;
+sub class($$) {
+	my ($flag, $arg) = @_;
+	push @flags, [$flag => $value];
+	if (ref($arg) eq 'Regexp') {
+		for (my $i = 0; $i < 256; $i++) {
+			$chars[$i] |= $value if chr($i) =~ $arg;
+		}
+
+	} elsif (ref($arg) eq 'ARRAY' && @$arg == 2) {
+		for (my $i = $arg->[0]; $i <= $arg->[1]; $i++) {
+			$chars[$i] |= $value;
+		}
+
+	} else {
+		for (my $i = 0; $i < length($arg); $i++) {
+			$chars[ord(substr($arg,$i,1))] |= $value;
+		}
+	}
+
+	$value <<= 1;
+}
+
+class TOKEN  => qr/[a-zA-Z0-9!#\$\%&'*+.^_`|~-]/;
+class CTL    => [0x00, 0x1f];    # RFC 5234
+class WSP    => " \t";           # RFC 5234
+class ALPHA  => qr/[a-zA-Z]/;    # RFC 5234
+class DIGIT  => qr/[0-9]/;       # RFC 5234
+class HEXDIG => qr/[0-9a-fA-F]/; # RFC 5234
+class VCHAR  => [0x21, 0x7e];    # RFC 5234
+
+# get the length of the longest flag name
+my $l = 0;
+for (@flags) { $l = length($_->[0]) > $l ? length($_->[0]) : $l; }
+
+print "/* character class names */\n";
+for (@flags) {
+	my $pad = " " x ($l - length($_->[0]));
+	printf "#define HTTP_CHAR_%s$pad 0x%02x\n", uc($_->[0]), $_->[1];
+}
+print "\n/* character class predicate macros */\n";
+print "#define http_ischar(c,f) (((http_chars[(c)&0xff]) & (f)) == (f))\n";
+for (@flags) {
+	my $pad = " " x ($l - length($_->[0]));
+	printf "#define http_is_%s(c)$pad (http_ischar((c),HTTP_CHAR_%s))\n", lc($_->[0]), uc($_->[0]);
+}
+printf "#define http_is_lf(c)     ((c)=='\\n')\n";
+printf "#define http_is_cr(c)     ((c)=='\\r')\n";
+printf "#define http_is_htab(c)   ((c)=='\\t')\n";
+printf "#define http_is_sp(c)     ((c)==' ')\n";
+printf "#define http_is_dquote(c) ((c)=='\"')\n";
+
+print "\n/* amalgamate lookup map of char -> flag */\n";
+print "static char http_chars[] = {";
+for (my $i = 0; $i < 256; $i++) {
+	if ($i % 8 == 0) { printf "\n  /* x%02x .. x%02x */ ", $i, $i+7; }
+	printf " 0x%02x,", $chars[$i];
+}
+print "\n};\n\n";
