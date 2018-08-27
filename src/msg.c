@@ -127,8 +127,9 @@ append(struct strand *st, const char *a, const char *b)
 		return NULL;
 
 	ins->len = b - a;
-	ins->data = malloc(sizeof(char) * ins->len);
+	ins->data = malloc(sizeof(char) * (ins->len + 1));
 	memcpy(ins->data, a, ins->len);
+	ins->data[ins->len] = '\0';
 	return st;
 }
 
@@ -140,12 +141,14 @@ appendc(struct strand *st, char c)
 }
 
 #define PBUFSIZ 1024
-#define PFSM_REQ_METHOD   0
-#define PFSM_REQ_TARGET   1
-#define PFSM_REQ_VERSION  2
-#define PFSM_HEADER_NAME  3
-#define PFSM_HEADER_VALUE 4
-#define PFSM_BODY         5
+#define PFSM_REQ_METHOD    0
+#define PFSM_REQ_TARGET    1
+#define PFSM_REQ_VERSION   2
+#define PFSM_HEADER_NAME   3
+#define PFSM_HEADER_NAME2  4
+#define PFSM_HEADER_VALUE  5
+#define PFSM_HEADER_VALUE2 6
+#define PFSM_BODY          7
 #define P_BAD_REQUEST    400
 #define P_INTERNAL_ERROR 500
 struct parser {
@@ -322,13 +325,20 @@ again:
 header_value:
 		while (c < end && http_is_wsp(*c))
 			c++;
-		if (c == end) goto hold;
+		if (c == end) goto slide;
+		p->dot = c - p->buf;
+		p->state = PFSM_HEADER_VALUE2;
+		/* fallthrough */
+
+	case PFSM_HEADER_VALUE2:
 		anchor = c;
 		while (c < end && !http_is_cr(*c))
 			c++;
 		if (c == end)        goto hold;
 		if (!http_is_cr(*c)) goto bad_request;
 		p->strand = append(p->strand, anchor, c);
+		/* FIXME: someting is weird here... a bug lies in wait */
+		/* FIXME: i think we're going to need more states for the FSM */
 		if (++c == end)      goto incomplete;
 		if (!http_is_lf(*c)) goto bad_request;
 		if (++c == end)      goto incomplete;
@@ -377,13 +387,12 @@ static void print_request(FILE *out, struct http_request *req)
 {
 	struct http_header *header, *next, *prev;
 
-	fprintf(out, "--[ request ]------\n");
 	fprintf(out, "%s %s HTTP/", req->req_method, req->req_uri);
 	switch (req->req_protocol) {
-	case HTTP_V0_9: fprintf(out, "0.9\n"); break;
-	case HTTP_V1_0: fprintf(out, "1.0\n"); break;
-	case HTTP_V1_1: fprintf(out, "1.1\n"); break;
-	case HTTP_V2:   fprintf(out, "2\n");   break;
+	case HTTP_V0_9: fprintf(out, "0.9\r\n"); break;
+	case HTTP_V1_0: fprintf(out, "1.0\r\n"); break;
+	case HTTP_V1_1: fprintf(out, "1.1\r\n"); break;
+	case HTTP_V2:   fprintf(out, "2\r\n");   break;
 	}
 
 	for (next = prev = NULL, header = req->headers;
@@ -393,8 +402,8 @@ static void print_request(FILE *out, struct http_request *req)
 	req->headers = prev;
 
 	for (header = req->headers; header; header = header->next)
-		fprintf(out, "%s: %s\n", header->name, header->value);
-	fprintf(out, "\n");
+		fprintf(out, "%s: %s\r\n", header->name, header->value);
+	fprintf(out, "\r\n");
 }
 
 static void free_request(struct http_request *req)
