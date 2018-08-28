@@ -1,0 +1,9 @@
+GET /some/path HTTP/1.1
+Host: localhost:8087
+User-Agent: curl/7.54.0
+Accept: */*
+X-Continued-Header: this is a
+ continued header, across
+	multiple lines with weird
+        whitespacing.  why?  who knows.
+
