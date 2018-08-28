@@ -3,7 +3,12 @@
 use Test::More;
 use File::Temp qw(tempfile tempdir);
 
-my $TEMPDIR = tempdir(CLEANUP => $ENV{KEEP} ? 0 : 1);
+my $TEMPDIR = "t/test-data";
+if ($ENV{KEEP}) {
+	`rm -rf t/test-data; mkdir t/test-data`;
+} else {
+	$TEMPDIR = tempdir(CLEANUP => 1);
+}
 
 sub minimal_request {
 	my %replace = @_;
@@ -25,6 +30,7 @@ sub minimal_request {
 	}
 
 	my ($fh, $file) = tempfile("braid.test.XXXXXXX", DIR => $TEMPDIR);
+	diag "test case $file:" if $ENV{KEEP};
 	print $fh $request;
 	close $fh;
 
