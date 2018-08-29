@@ -1,5 +1,5 @@
 all: msgtest randcat
-test:
+test: msgtest
 	prove t/*.t
 
 fuzz: msgtest

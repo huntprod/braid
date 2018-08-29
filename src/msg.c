@@ -68,6 +68,7 @@ struct strand {
 };
 
 static char * string(struct strand *st);
+void unravel(struct strand *st);
 static struct strand * append(struct strand *st, const char *a, const char *b);
 static struct strand * appendc(struct strand *st, char c);
 
@@ -100,12 +101,20 @@ string(struct strand *st)
 		memcpy(s+i, tmp->data, tmp->len);
 		i += tmp->len;
 		st = tmp->next;
+		free(tmp->data);
 		free(tmp);
 		tmp = st;
 	}
 	assert(i == len);
 	s[i] = '\0';
 	return s;
+}
+
+void
+unravel(struct strand *st)
+{
+	struct strand *tmp;
+	for (; st; tmp = st->next, free(st->data), free(st), st = tmp);
 }
 
 static struct strand *
@@ -148,7 +157,8 @@ appendc(struct strand *st, char c)
 #define PFSM_HEADER_NAME2  4
 #define PFSM_HEADER_VALUE  5
 #define PFSM_HEADER_VALUE2 6
-#define PFSM_BODY          7
+#define PFSM_HEADER_VALUE3 7
+#define PFSM_BODY          8
 #define P_BAD_REQUEST    400
 #define P_INTERNAL_ERROR 500
 struct parser {
@@ -196,7 +206,7 @@ advance(struct parser *p)
 reread:
 	nread = read(p->fd,
 	             p->buf + p->used,
-	             PBUFSIZ - p->used);
+	             PBUFSIZ - p->used - 1);
 
 	if (nread < 0)
 		return -1;
@@ -224,7 +234,7 @@ again:
 		c += 1;
 		p->dot = c - p->buf;
 		p->state = PFSM_REQ_TARGET;
-		/* fallthrough */
+		goto reset;
 
 	case PFSM_REQ_TARGET:
 		/* eat !SP chars until we hit SP. */
@@ -239,7 +249,7 @@ again:
 		c += 1;
 		p->dot = c - p->buf;
 		p->state = PFSM_REQ_VERSION;
-		/* fallthrough */
+		goto reset;
 
 	case PFSM_REQ_VERSION:
 		anchor = c;
@@ -292,7 +302,7 @@ again:
 		c += 1;
 		p->dot = c - p->buf;
 		p->state = PFSM_HEADER_NAME;
-		/* fallthrough */
+		goto reset;
 
 	case PFSM_HEADER_NAME:
 		anchor = p->buf + p->dot;
@@ -302,33 +312,38 @@ again:
 			c += 1;
 			p->dot = c - p->buf;
 			p->state = PFSM_BODY;
-			goto again;
+			goto reset;
 		}
-		if (!http_is_token(*c)) goto bad_request;
-		while (c < end && http_is_token(*c))
-			c++;
-		p->strand = append(p->strand, anchor, c);
-		if (c == end)
-			goto slide;
+		if (*c != ':') {
+			if (!http_is_token(*c)) goto bad_request;
+			while (c < end && http_is_token(*c))
+				c++;
+			if (c == end)  goto hold;
+		}
 		if (*c != ':') goto bad_request;
+		p->strand = append(p->strand, anchor, c);
+
 		p->header = new(struct http_header);
 		p->header->next = p->req->headers;
 		p->req->headers = p->header;
 		p->header->name = string(p->strand);
 		p->strand = NULL;
+
 		c += 1;
 		p->dot = c - p->buf;
 		p->state = PFSM_HEADER_VALUE;
-		/* fallthrough */
+		goto reset;
 
 	case PFSM_HEADER_VALUE:
 header_value:
+		p->state = PFSM_HEADER_VALUE;
 		while (c < end && http_is_wsp(*c))
 			c++;
-		if (c == end) goto slide;
+		if (c == end)
+			goto slide;
 		p->dot = c - p->buf;
 		p->state = PFSM_HEADER_VALUE2;
-		/* fallthrough */
+		goto reset;
 
 	case PFSM_HEADER_VALUE2:
 		anchor = c;
@@ -337,8 +352,11 @@ header_value:
 		if (c == end)        goto hold;
 		if (!http_is_cr(*c)) goto bad_request;
 		p->strand = append(p->strand, anchor, c);
-		/* FIXME: someting is weird here... a bug lies in wait */
-		/* FIXME: i think we're going to need more states for the FSM */
+		p->dot = c - p->buf;
+		p->state = PFSM_HEADER_VALUE3;
+		goto reset;
+
+	case PFSM_HEADER_VALUE3:
 		if (++c == end)      goto incomplete;
 		if (!http_is_lf(*c)) goto bad_request;
 		if (++c == end)      goto incomplete;
@@ -350,7 +368,7 @@ header_value:
 		p->strand = NULL;
 		p->dot = c - p->buf;
 		p->state = PFSM_HEADER_NAME;
-		goto again;
+		goto reset;
 
 	case PFSM_BODY:
 		break;
@@ -361,21 +379,27 @@ header_value:
 hold:
 	p->strand = append(p->strand, anchor, c);
 slide:
-	fprintf(stderr, "... and we're out of bytes.  sliding the buffer.\n");
 	p->used = p->dot = 0;
 	goto reread;
 
+reset:
+	if (p->dot != 0) {
+		memmove(p->buf, p->buf + p->dot, p->used - p->dot);
+		p->used -= p->dot;
+		p->dot = 0;
+	}
+	goto reread;
+
 incomplete:
-	fprintf(stderr, "... and we're out of bytes.\n");
 	return 0; /* FIXME: if we EOF'd... */
 
 bad_request:
-	fprintf(stderr, "oops, triggering a BAD_REQUEST...\n");
+	fprintf(stderr, "BAD REQUEST [%s]\n", p->buf);
+	fprintf(stderr, "            %*s^^^\n", (int)(c - p->buf), "");
 	p->flags = P_BAD_REQUEST;
 	return -1;
 
 internal_error:
-	fprintf(stderr, "oops, triggering an INTERNAL_ERROR...\n");
 	p->flags = P_INTERNAL_ERROR;
 	return -1;
 }
@@ -408,6 +432,18 @@ static void print_request(FILE *out, struct http_request *req)
 
 static void free_request(struct http_request *req)
 {
+	struct http_header *header, *tmp;
+
+	for (header = req->headers;
+	     header != NULL;
+	     tmp = header->next,
+	     free(header->name),
+	     free(header->value),
+	     free(header),
+	     header = tmp);
+
+	free(req->req_method);
+	free(req->req_uri);
 	free(req);
 }
 
@@ -437,13 +473,17 @@ void tests() {
 int main(int argc, char **argv)
 {
 	struct parser parser;
-	struct http_request *req;
 	tests();
 
 	memset(&parser, 0, sizeof(parser));
 	parser.fd = 0;
 	advance(&parser);
-	print_request(stdout, parser.req);
-	free_request(req);
+	if (parser.flags & P_BAD_REQUEST) {
+		printf("BAD REQUEST\n");
+	} else {
+		print_request(stdout, parser.req);
+	}
+	free_request(parser.req);
+	unravel(parser.strand);
 	return 0;
 }
